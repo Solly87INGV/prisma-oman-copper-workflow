@@ -1,21 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-PRISMA (VNIR+SWIR) -> SMA (pseudo-FCLS) + RMSE + Dominant maps
-
-- Export frazioni per ogni endmember (GeoTIFF separati)
-- Dominant "classico" (opzionale): max(frac) >= SMA_PURITY_THR
-- Dominant "score-normalized" (Strategia A): standardizzazione per endmember usando p50/p90
-  score = clip((frac - p50) / (p90 - p50), 0..1)
-  dominant_score = argmax(score)
-  purity_score = max(score) >= SCORE_PURITY_THR
-
-PATCH richiesto (ROI):
-- Applica una ROI da shapefile: output SOLO nell'area del poligono
-- Crop degli output alla bounding box del poligono
-"""
-
 import os, re, json, logging
 import numpy as np
 import rasterio
@@ -25,46 +10,34 @@ from rasterio.windows import transform as window_transform
 from rasterio.warp import transform_geom
 import fiona
 
-# ==================== CONFIG ====================
-INPUT_ENVI = r"D:\INGV\1_Human Mobility\PRISMA\PRS_L2D_STD_20220609065_219\PRS_L2D_STD_20220609065219_20220609065223_0001\VNIR_SWIR_latlon_219"
-LIB_MINERALS_DIR = r"D:\INGV\Hyperspectral\NEW_Readapt_scrpt_USGS_SpecLib\new selection minerals usgs\MASPAG 2025\Minerals\Copper"
-OUTPUT_DIR = r"D:\INGV\Hyperspectral\NEW_Readapt_scrpt_USGS_SpecLib\new selection minerals usgs\MASPAG 2025\outputs\output_219\output_Copper\polygon_output"
-USGS_ASD_WAVELENGTHS_TXT = r"D:\INGV\Hyperspectral\NEW_Readapt_scrpt_USGS_SpecLib\new selection minerals usgs\ValidazioneScript\_wavelengths\splib07a_Wavelengths_ASD_0.35-2.5_microns_2151_ch.txt"
-
-# ROI shapefile (poligono area analisi)
-ROI_SHP = r"D:\INGV\Hyperspectral\NEW_Readapt_scrpt_USGS_SpecLib\new selection minerals usgs\MASPAG 2025\Analisi_GIS\Area_Samples.shp"
+INPUT_ENVI = "PRS_L2D_STD_20220609065_219/PRS_L2D_STD_20220609065219_20220609065223_0001/VNIR_SWIR_latlon_219"
+LIB_MINERALS_DIR = "Minerals/Copper"
+OUTPUT_DIR = "outputs"
+USGS_ASD_WAVELENGTHS_TXT = "splib07a_Wavelengths_ASD_0.35-2.5_microns_2151_ch.txt"
+ROI_SHP = "Area_Samples.shp"
 APPLY_ROI = True
 
-# Bande PRISMA buone (µm)
 WL_MIN = 0.45
 WL_MAX = 2.45
 DROP_WINDOWS = [(1.35, 1.45), (1.80, 1.95)]
 
-# Pixel validity (guard-rail)
 VALID_MEAN_MIN = 0.02
-VALID_RNG_MIN  = 0.01
+VALID_RNG_MIN = 0.01
 
-# SMA options
 SMA_ADD_DARKFLAT = True
 DARKFLAT_LEVEL = 0.5
-
-# Safety cap
 SMA_MAX_ENDMEMBERS = 30
 
-# Dominant "classico" su frazione (se vuoi tenerlo)
 EXPORT_DOMINANT_FRAC = False
 SMA_PURITY_THR = 0.75
 
-# ===== Strategia A: Dominant su SCORE normalizzato =====
 EXPORT_DOMINANT_SCORE = True
 SCORE_P50 = 50
 SCORE_P90 = 90
-SCORE_PURITY_THR = 0.75   # soglia su max(score), non su max(frac)
-# =======================================================
+SCORE_PURITY_THR = 0.75
 
-# Output control
 EXPORT_PER_MINERAL_TIFS = True
-EXPORT_FRACS_ALL_MULTIBAND = False  # opzionale
+EXPORT_FRACS_ALL_MULTIBAND = False
 
 USGS_NODATA = -1.23e34
 FLOAT_NODATA = -9999.0
@@ -119,7 +92,7 @@ def open_prisma(envi_base):
         else:
             raise FileNotFoundError(f"File dati non trovato: {envi_base} (o {envi_base}.dat)")
     with rasterio.open(data_file) as ds:
-        cube = ds.read()  # (bands, rows, cols)
+        cube = ds.read()
         transform, crs = ds.transform, ds.crs
         height, width = ds.height, ds.width
     return cube, transform, crs, height, width
@@ -299,7 +272,6 @@ def _project_to_simplex(v):
     return (w / s).astype(np.float32) if s > 0 else np.full((n,), 1.0 / n, dtype=np.float32)
 
 def _read_roi_geoms_and_window(shp_path, raster_crs, raster_transform, raster_height, raster_width):
-    # read & reproject geometries to raster CRS
     with fiona.open(shp_path, "r") as src:
         shp_crs = src.crs_wkt or src.crs
         geoms = []
@@ -314,7 +286,6 @@ def _read_roi_geoms_and_window(shp_path, raster_crs, raster_transform, raster_he
     if not geoms:
         raise RuntimeError("ROI shapefile: nessuna geometria valida trovata.")
 
-    # bounds union
     minx, miny, maxx, maxy = None, None, None, None
     for g in geoms:
         bx, by, bX, bY = rasterio.features.bounds(g)
@@ -326,7 +297,6 @@ def _read_roi_geoms_and_window(shp_path, raster_crs, raster_transform, raster_he
     win = from_bounds(minx, miny, maxx, maxy, transform=raster_transform)
     win = win.round_offsets().round_lengths()
 
-    # clamp
     col_off = max(0, int(win.col_off))
     row_off = max(0, int(win.row_off))
     width = int(win.width)
@@ -349,7 +319,6 @@ def main():
     n_b, r_full, c_full = cube.shape
     cube = cube.astype(np.float32, copy=False)
 
-    # wavelengths PRISMA
     hdr = INPUT_ENVI if INPUT_ENVI.lower().endswith(".hdr") else INPUT_ENVI + ".hdr"
     wl = read_wavelengths_from_hdr(hdr)
     if wl is None or wl.size != n_b:
@@ -361,7 +330,6 @@ def main():
     wl_good = wl[good]
     logging.info(f"Bande buone PRISMA: {good.sum()}/{n_b}")
 
-    # ROI: compute window + mask
     if APPLY_ROI:
         geoms, (row_off, col_off, r, c) = _read_roi_geoms_and_window(ROI_SHP, crs, transform, H, W)
         win = rasterio.windows.Window(col_off=col_off, row_off=row_off, width=c, height=r)
@@ -371,7 +339,7 @@ def main():
             geoms,
             out_shape=(r, c),
             transform=out_transform,
-            invert=True  # True inside ROI
+            invert=True
         )
         logging.info(f"ROI attiva: window rows={r} cols={c} (offset r={row_off}, c={col_off})")
         logging.info(f"ROI pixels inside: {int(np.sum(roi_mask))}/{r*c}")
@@ -380,7 +348,6 @@ def main():
         out_transform = transform
         roi_mask = np.ones((r, c), dtype=bool)
 
-    # USGS wavelengths + library
     wl_usgs = load_usgs_asd_wavelengths(USGS_ASD_WAVELENGTHS_TXT)
     mineral_names, lib_raw = build_library_auto(LIB_MINERALS_DIR, wl_good, wl_usgs)
     logging.info(f"Spettri caricati da libreria: {len(mineral_names)}")
@@ -412,13 +379,11 @@ def main():
     sma_rmse = np.full((r, c), np.nan, np.float32)
     valid_total = 0
 
-    # loop only on ROI window rows
     for i in range(r):
         if i % 50 == 0:
             logging.info(f"Riga ROI {i+1}/{r}")
 
         row_idx = row_off + i
-        # slice only ROI window cols
         row_raw = np.transpose(cube[:, row_idx, col_off:col_off + c], (1, 0)).copy()
         row_raw[~np.isfinite(row_raw)] = 0
         row_raw[row_raw < 0] = 0
@@ -430,7 +395,6 @@ def main():
         rng_ref = p95 - p05
         valid = (mean_ref >= VALID_MEAN_MIN) & (rng_ref >= VALID_RNG_MIN)
 
-        # apply ROI mask row
         valid &= roi_mask[i, :]
 
         valid_total += int(np.sum(valid))
@@ -453,24 +417,19 @@ def main():
 
     base = _scene_basename(INPUT_ENVI)
 
-    # RMSE (outside ROI -> nodata)
     rmse_out = sma_rmse.copy()
     rmse_out[~roi_mask] = FLOAT_NODATA
     save_tif(os.path.join(OUTPUT_DIR, f"{base}_ROI_sma_rmse.tif"), rmse_out, out_transform, crs, "float32", nodata=FLOAT_NODATA)
 
-    # Selected = all except DarkFlat
     sel = [(bi, name) for bi, name in enumerate(sma_used) if name.lower().strip() != "darkflat"]
     if not sel:
         raise RuntimeError("Solo DarkFlat in SMA: libreria vuota o cap errato.")
 
-    # Stack (k,r,c) in sel order
     frac_stack = np.stack([sma_frac[bi, :, :] for (bi, _) in sel], axis=0).astype(np.float32)
 
-    # apply ROI nodata to frac bands
     frac_stack_out = frac_stack.copy()
     frac_stack_out[:, ~roi_mask] = FLOAT_NODATA
 
-    # Legend
     fracs_legend = {int(i + 1): sel[i][1] for i in range(len(sel))}
     json.dump(
         {"note": "Band i (1-based) = fraction of endmember i", "bands": fracs_legend},
@@ -478,14 +437,12 @@ def main():
         ensure_ascii=False, indent=2
     )
 
-    # Optional multiband
     if EXPORT_FRACS_ALL_MULTIBAND:
         save_tif_multiband(
             os.path.join(OUTPUT_DIR, f"{base}_ROI_sma_fracs_all.tif"),
             frac_stack_out, out_transform, crs, "float32", nodata=FLOAT_NODATA
         )
 
-    # Export per-mineral frac
     if EXPORT_PER_MINERAL_TIFS:
         for band_i, (bi, name) in enumerate(sel, start=1):
             frac_map = sma_frac[bi, :, :].astype(np.float32)
@@ -495,14 +452,12 @@ def main():
                 frac_map, out_transform, crs, "float32", nodata=FLOAT_NODATA
             )
 
-    # maxfrac (raw)
     maxfrac = np.max(frac_stack, axis=0).astype(np.float32)
     argmax = np.argmax(frac_stack, axis=0).astype(np.int32)
     maxfrac_out = maxfrac.copy()
     maxfrac_out[~roi_mask] = FLOAT_NODATA
     save_tif(os.path.join(OUTPUT_DIR, f"{base}_ROI_sma_maxfrac_selected.tif"), maxfrac_out, out_transform, crs, "float32", nodata=FLOAT_NODATA)
 
-    # Dominant purity (raw frac) optional
     if EXPORT_DOMINANT_FRAC:
         dom = np.zeros((r, c), dtype=np.uint16)
         strong = (maxfrac >= float(SMA_PURITY_THR)) & roi_mask
@@ -512,7 +467,6 @@ def main():
             dom, out_transform, crs, "uint16", nodata=None
         )
 
-    # ===== Strategia A: SCORE-normalized dominant =====
     if EXPORT_DOMINANT_SCORE:
         valid_mask = np.isfinite(sma_rmse) & roi_mask
         stats = {}
@@ -575,7 +529,6 @@ def main():
             ensure_ascii=False, indent=2
         )
 
-    # report
     json.dump(
         {
             "paths": {
