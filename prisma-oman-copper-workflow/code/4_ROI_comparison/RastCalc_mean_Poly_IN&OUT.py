@@ -10,28 +10,20 @@ from rasterio.windows import transform as window_transform
 from rasterio.warp import transform_geom
 import fiona
 
-
-# =========================
-# CONFIG (UNA SOLA SCENA)
-# =========================
 NAME = "VNIR_SWIR_latlon_219"
-RUN_LABEL = "Alteration"  # cambia in "Gossan" quando fai quel run
+RUN_LABEL = "Alteration"
 
-COPPER_MASK = r"D:\INGV\1_Human Mobility\PRISMA\output_SAM_selective\VNIR_SWIR_latlon_219_copper_mask.tif"  # 0..255
-RMSE_TIF    = r"D:\INGV\Hyperspectral\NEW_Readapt_scrpt_USGS_SpecLib\new selection minerals usgs\MASPAG 2025\outputs\output_219\output_Gossan\VNIR_SWIR_latlon_219_sma_rmse.tif"
-MAXSCORE_TIF= r"D:\INGV\Hyperspectral\NEW_Readapt_scrpt_USGS_SpecLib\new selection minerals usgs\MASPAG 2025\outputs\output_219\output_Gossan\VNIR_SWIR_latlon_219_sma_maxscore_selected.tif"
+COPPER_MASK = "VNIR_SWIR_latlon_219_copper_mask.tif"
+RMSE_TIF = "VNIR_SWIR_latlon_219_sma_rmse.tif"
+MAXSCORE_TIF = "VNIR_SWIR_latlon_219_sma_maxscore_selected.tif"
 
-# ROI polygon (area campioni)
-ROI_SHP = r"D:\INGV\Hyperspectral\NEW_Readapt_scrpt_USGS_SpecLib\new selection minerals usgs\MASPAG 2025\Analisi_GIS\Area_Samples.shp"
+ROI_SHP = "Area_Samples.shp"
 APPLY_ROI = True
 
-OUT_DIR = r"D:\INGV\Hyperspectral\NEW_Readapt_scrpt_USGS_SpecLib\new selection minerals usgs\MASPAG 2025\Analisi_GIS\output_cop\IN&OUT_gos"
-
+OUT_DIR = "output_stats"
 WRITE_MASKED_TIFS = True
 NODATA_OUT = -9999.0
 MASK_VALUE = 255
-# =========================
-
 
 def _stats(arr: np.ndarray) -> dict:
     if arr.size == 0:
@@ -58,7 +50,6 @@ def _stats(arr: np.ndarray) -> dict:
         "p90": float(np.percentile(arr, 90)),
     }
 
-
 def _read_band1(path: str):
     with rasterio.open(path) as ds:
         a = ds.read(1)
@@ -69,7 +60,6 @@ def _read_band1(path: str):
         height = ds.height
         width = ds.width
     return a, meta, nodata, transform, crs, height, width
-
 
 def _aligned_check(ref_meta, other_meta, label=""):
     ok = True
@@ -85,7 +75,6 @@ def _aligned_check(ref_meta, other_meta, label=""):
             f"Serve stessa griglia: extent/transform/shape/crs."
         )
 
-
 def _write_masked_tif(out_path: str, data: np.ndarray, ref_meta: dict, transform):
     meta = ref_meta.copy()
     meta.update({
@@ -98,7 +87,6 @@ def _write_masked_tif(out_path: str, data: np.ndarray, ref_meta: dict, transform
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with rasterio.open(out_path, "w", **meta) as dst:
         dst.write(data.astype(np.float32), 1)
-
 
 def _read_roi_geoms_and_window(shp_path, raster_crs, raster_transform, raster_height, raster_width):
     with fiona.open(shp_path, "r") as src:
@@ -140,15 +128,12 @@ def _read_roi_geoms_and_window(shp_path, raster_crs, raster_transform, raster_he
 
     return geoms, (row_off, col_off, height, width)
 
-
 def _compute_stats_for_selector(selector_mask, rmse_w, ms_w, nodata_rmse, nodata_ms):
-    # RMSE valid
     valid_rmse = selector_mask.copy()
     if nodata_rmse is not None:
         valid_rmse &= (rmse_w != nodata_rmse)
     valid_rmse &= np.isfinite(rmse_w)
 
-    # Maxscore valid
     valid_ms = selector_mask.copy()
     if nodata_ms is not None:
         valid_ms &= (ms_w != nodata_ms)
@@ -158,7 +143,6 @@ def _compute_stats_for_selector(selector_mask, rmse_w, ms_w, nodata_rmse, nodata
     ms_in   = ms_w[valid_ms].astype(np.float64)
 
     return _stats(rmse_in), _stats(ms_in), valid_rmse, valid_ms
-
 
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
@@ -171,7 +155,6 @@ def main():
     _aligned_check(meta_mask, meta_rmse, label="mask vs rmse")
     _aligned_check(meta_mask, meta_ms,   label="mask vs maxscore")
 
-    # ROI crop
     if APPLY_ROI:
         if not os.path.exists(ROI_SHP):
             raise FileNotFoundError(f"ROI_SHP non trovato: {ROI_SHP}")
@@ -194,9 +177,8 @@ def main():
         out_transform = tr
         meta_out = meta_rmse.copy()
 
-    # selectors within ROI
     inside_sel  = (mask_w == MASK_VALUE) & roi_mask
-    outside_sel = (mask_w != MASK_VALUE) & roi_mask  # background in ROI
+    outside_sel = (mask_w != MASK_VALUE) & roi_mask
 
     inside_rmse, inside_ms, valid_rmse_in, valid_ms_in = _compute_stats_for_selector(
         inside_sel, rmse_w, ms_w, nodata_rmse, nodata_ms
@@ -210,9 +192,7 @@ def main():
     print("OUTSIDE (mask!=255) RMSE:", outside_rmse)
     print("OUTSIDE (mask!=255) MaxScore:", outside_ms)
 
-    # write masked rasters (ROI-cropped)
     if WRITE_MASKED_TIFS:
-        # inside
         rmse_inside = np.full_like(rmse_w, NODATA_OUT, dtype=np.float32)
         rmse_inside[valid_rmse_in] = rmse_w[valid_rmse_in].astype(np.float32)
         _write_masked_tif(os.path.join(OUT_DIR, f"{NAME}_{RUN_LABEL}_ROI_inside_rmse.tif"), rmse_inside, meta_out, out_transform)
@@ -221,7 +201,6 @@ def main():
         ms_inside[valid_ms_in] = ms_w[valid_ms_in].astype(np.float32)
         _write_masked_tif(os.path.join(OUT_DIR, f"{NAME}_{RUN_LABEL}_ROI_inside_maxscore.tif"), ms_inside, meta_out, out_transform)
 
-        # outside
         rmse_outside = np.full_like(rmse_w, NODATA_OUT, dtype=np.float32)
         rmse_outside[valid_rmse_out] = rmse_w[valid_rmse_out].astype(np.float32)
         _write_masked_tif(os.path.join(OUT_DIR, f"{NAME}_{RUN_LABEL}_ROI_outside_rmse.tif"), rmse_outside, meta_out, out_transform)
@@ -281,7 +260,6 @@ def main():
     print("Saved:", csv_path)
     if WRITE_MASKED_TIFS:
         print("Saved 4 ROI masked tifs in:", OUT_DIR)
-
 
 if __name__ == "__main__":
     main()
