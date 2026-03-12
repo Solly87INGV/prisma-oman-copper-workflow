@@ -1,64 +1,36 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-PRISMA (VNIR+SWIR) -> SMA (pseudo-FCLS) + RMSE + Dominant maps
-
-- Export frazioni per ogni endmember (GeoTIFF separati)
-- Dominant "classico" (opzionale): max(frac) >= SMA_PURITY_THR
-- Dominant "score-normalized" (Strategia A): standardizzazione per endmember usando p50/p90
-  score = clip((frac - p50) / (p90 - p50), 0..1)
-  dominant_score = argmax(score)
-  purity_score = max(score) >= SCORE_PURITY_THR
-
-JSON:
-- sma_endmembers_used.json
-- sma_fracs_legend.json
-- sma_purity_legend.json
-- sma_score_norm_stats.json
-- report.json
-"""
-
 import os, re, json, logging
 import numpy as np
 import rasterio
 
-# ==================== CONFIG ====================
-INPUT_ENVI = r"D:\INGV\1_Human Mobility\PRISMA\PRS_L2D_STD_20220609065_219\PRS_L2D_STD_20220609065219_20220609065223_0001\VNIR_SWIR_latlon_219"
-LIB_MINERALS_DIR = r"D:\INGV\Hyperspectral\NEW_Readapt_scrpt_USGS_SpecLib\new selection minerals usgs\MASPAG 2025\Minerals"
-OUTPUT_DIR = r"D:\INGV\Hyperspectral\NEW_Readapt_scrpt_USGS_SpecLib\new selection minerals usgs\MASPAG 2025\outputs\output_219\output_Copper"
-USGS_ASD_WAVELENGTHS_TXT = r"D:\INGV\Hyperspectral\NEW_Readapt_scrpt_USGS_SpecLib\new selection minerals usgs\ValidazioneScript\_wavelengths\splib07a_Wavelengths_ASD_0.35-2.5_microns_2151_ch.txt"
+INPUT_ENVI = "PRS_L2D_STD_20220609065_219/PRS_L2D_STD_20220609065219_20220609065223_0001/VNIR_SWIR_latlon_219"
+LIB_MINERALS_DIR = "Minerals"
+OUTPUT_DIR = "outputs"
+USGS_ASD_WAVELENGTHS_TXT = "splib07a_Wavelengths_ASD_0.35-2.5_microns_2151_ch.txt"
 
-# Bande PRISMA buone (µm)
 WL_MIN = 0.45
 WL_MAX = 2.45
 DROP_WINDOWS = [(1.35, 1.45), (1.80, 1.95)]
 
-# Pixel validity (guard-rail)
 VALID_MEAN_MIN = 0.02
-VALID_RNG_MIN  = 0.01
+VALID_RNG_MIN = 0.01
 
-# SMA options
 SMA_ADD_DARKFLAT = True
 DARKFLAT_LEVEL = 0.5
-
-# Safety cap
 SMA_MAX_ENDMEMBERS = 30
 
-# Dominant "classico" su frazione (se vuoi tenerlo)
 EXPORT_DOMINANT_FRAC = False
 SMA_PURITY_THR = 0.75
 
-# ===== Strategia A: Dominant su SCORE normalizzato =====
 EXPORT_DOMINANT_SCORE = True
 SCORE_P50 = 50
 SCORE_P90 = 90
-SCORE_PURITY_THR = 0.75   # soglia su max(score), non su max(frac)
-# =======================================================
+SCORE_PURITY_THR = 0.75
 
-# Output control
 EXPORT_PER_MINERAL_TIFS = True
-EXPORT_FRACS_ALL_MULTIBAND = False  # opzionale
+EXPORT_FRACS_ALL_MULTIBAND = False
 
 USGS_NODATA = -1.23e34
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -315,7 +287,7 @@ def main():
     if len(cols) < 3:
         raise RuntimeError("Endmembers SMA < 3: aggiungi spettri in libreria (min 3).")
 
-    E = np.stack(cols, axis=1).astype(np.float32)  # (bands, m)
+    E = np.stack(cols, axis=1).astype(np.float32)
     m_end = E.shape[1]
 
     json.dump(
@@ -363,18 +335,14 @@ def main():
 
     base = _scene_basename(INPUT_ENVI)
 
-    # RMSE
     save_tif(os.path.join(OUTPUT_DIR, f"{base}_sma_rmse.tif"), sma_rmse, transform, crs, "float32")
 
-    # Selected = all except DarkFlat
     sel = [(bi, name) for bi, name in enumerate(sma_used) if name.lower().strip() != "darkflat"]
     if not sel:
         raise RuntimeError("Solo DarkFlat in SMA: libreria vuota o cap errato.")
 
-    # Stack (k,r,c) in sel order
     frac_stack = np.stack([sma_frac[bi, :, :] for (bi, _) in sel], axis=0).astype(np.float32)
 
-    # Legend
     fracs_legend = {int(i + 1): sel[i][1] for i in range(len(sel))}
     json.dump(
         {"note": "Band i (1-based) = fraction of endmember i", "bands": fracs_legend},
@@ -382,11 +350,9 @@ def main():
         ensure_ascii=False, indent=2
     )
 
-    # Optional multiband
     if EXPORT_FRACS_ALL_MULTIBAND:
         save_tif_multiband(os.path.join(OUTPUT_DIR, f"{base}_sma_fracs_all.tif"), frac_stack, transform, crs, "float32")
 
-    # Export per-mineral frac
     if EXPORT_PER_MINERAL_TIFS:
         for band_i, (bi, name) in enumerate(sel, start=1):
             save_tif(
@@ -395,12 +361,10 @@ def main():
                 transform, crs, "float32"
             )
 
-    # maxfrac (raw)
     maxfrac = np.max(frac_stack, axis=0).astype(np.float32)
     argmax = np.argmax(frac_stack, axis=0).astype(np.int32)
     save_tif(os.path.join(OUTPUT_DIR, f"{base}_sma_maxfrac_selected.tif"), maxfrac, transform, crs, "float32")
 
-    # Dominant purity (raw frac) optional
     if EXPORT_DOMINANT_FRAC:
         dom = np.zeros((r, c), dtype=np.uint16)
         strong = maxfrac >= float(SMA_PURITY_THR)
@@ -410,18 +374,15 @@ def main():
             dom, transform, crs, "uint16"
         )
 
-    # ===== Strategia A: SCORE-normalized dominant =====
     if EXPORT_DOMINANT_SCORE:
         valid_mask = np.isfinite(sma_rmse)
         stats = {}
         p50s = np.zeros((len(sel),), dtype=np.float32)
         p90s = np.zeros((len(sel),), dtype=np.float32)
 
-        # compute per-endmember percentiles on valid pixels
         for i_em, (bi, name) in enumerate(sel):
             v = sma_frac[bi, :, :][valid_mask]
             if v.size < 50:
-                # fallback safe
                 p50 = float(np.nanmedian(v)) if v.size else 0.0
                 p90 = float(np.nanpercentile(v, 90)) if v.size else 1.0
             else:
@@ -434,11 +395,9 @@ def main():
             p90s[i_em] = p90
             stats[name] = {"p50": p50, "p90": p90}
 
-        # build score stack
         denom = (p90s - p50s)
         denom = np.where(denom <= 1e-9, 1e-9, denom).astype(np.float32)
 
-        # score_stack shape (k,r,c)
         score_stack = np.empty_like(frac_stack, dtype=np.float32)
         for i_em in range(len(sel)):
             score_stack[i_em, :, :] = np.clip((frac_stack[i_em, :, :] - p50s[i_em]) / denom[i_em], 0.0, 1.0)
@@ -469,14 +428,12 @@ def main():
             ensure_ascii=False, indent=2
         )
 
-        # legend for dominant_score map codes
         json.dump(
             {"dominant_score_codes": fracs_legend},
             open(os.path.join(OUTPUT_DIR, "sma_dominant_score_legend.json"), "w", encoding="utf-8"),
             ensure_ascii=False, indent=2
         )
 
-    # report
     json.dump(
         {
             "paths": {
